@@ -50,6 +50,7 @@ Future enhancements:
 """
 
 import os
+import pty
 import re
 import signal
 import select
@@ -79,8 +80,8 @@ class Node( object ):
         # Make sure class actually works
         self.checkSetup()
 
-        self.name = name
-        self.inNamespace = inNamespace
+        self.name = params.get( 'name', name )
+        self.inNamespace = params.get( 'inNamespace', inNamespace )
 
         # Stash configuration parameters for future reference
         self.params = params
@@ -127,17 +128,23 @@ class Node( object ):
             error( "%s: shell is already running" )
             return
         # mnexec: (c)lose descriptors, (d)etach from tty,
-        # (p)rint pid, and run in (n)amespace
-        opts = '-cdp'
+        # and run in (n)amespace
+        opts = '-cd'
         if self.inNamespace:
             opts += 'n'
-        # bash -m: enable job control
+        # bash -m: enable job control, i: force interactive
         # -s: pass $* to shell, and make process easy to find in ps
-        cmd = [ 'mnexec', opts, 'bash', '-ms', 'mininet:' + self.name ]
-        self.shell = self._popen( cmd, stdin=PIPE, stdout=PIPE, stderr=STDOUT,
-                     close_fds=True )
-        self.stdin = self.shell.stdin
-        self.stdout = self.shell.stdout
+        cmd = [ 'mnexec', opts, 'env', 'PS1=' + chr(127), 'bash',
+               '--norc', '-mis', 'mininet:' + self.name]
+        # Spawn a shell subprocess in a pseudo-tty, to disable buffering
+        # in the subprocess and insulate it from signals (e.g. SIGINT)
+        # received by the parent
+        master, slave = pty.openpty()
+        self.shell = self._popen( cmd, stdin=slave, stdout=slave, stderr=slave,
+            close_fds=False )
+        self.stdin = os.fdopen( master )
+        self.stdout = self.stdin
+        self.pid = self.shell.pid
         self.pollOut = select.poll()
         self.pollOut.register( self.stdout )
         # Maintain mapping between file descriptors and nodes
@@ -149,8 +156,14 @@ class Node( object ):
         self.lastCmd = None
         self.lastPid = None
         self.readbuf = ''
+        # Wait for prompt
+        while True:
+            data = self.read( 1024 )
+            if chr( 127 ) in data:
+                break
+            self.pollOut.poll()
         self.waiting = False
-        self.pid = int( self.cmd( 'echo $$' ) )
+        self.cmd( 'stty -echo' )
 
     def cleanup( self ):
         "Help python collect its garbage."
@@ -215,7 +228,7 @@ class Node( object ):
            args: command and arguments, or string
            printPid: print command's PID?"""
         assert not self.waiting
-        printPid = kwargs.get( 'printPid', True )
+        printPid = kwargs.get( 'printPid', False )
         # Allow sendCmd( [ list ] )
         if len( args ) == 1 and type( args[ 0 ] ) is list:
             cmd = args[ 0 ]
@@ -229,36 +242,26 @@ class Node( object ):
             # Replace empty commands with something harmless
             cmd = 'echo -n'
         self.lastCmd = cmd
-        printPid = printPid and not isShellBuiltin( cmd )
-        if len( cmd ) > 0 and cmd[ -1 ] == '&':
-            # print ^A{pid}\n{sentinel}
-            cmd += ' printf "\\001%d\n\\177" $! \n'
-        else:
-            # print sentinel
-            cmd += '; printf "\\177"'
-            if printPid and not isShellBuiltin( cmd ):
-                cmd = 'mnexec -p ' + cmd
+        if printPid and not isShellBuiltin( cmd ):
+            cmd = 'mnexec -p ' + cmd
         self.write( cmd + '\n' )
         self.lastPid = None
         self.waiting = True
 
     def sendInt( self, sig=signal.SIGINT ):
         "Interrupt running command."
-        if self.lastPid:
-            try:
-                os.kill( self.lastPid, sig )
-            except OSError:
-                pass
+        self.write( chr( 3 ) )
 
-    def monitor( self, timeoutms=None ):
+    def monitor( self, timeoutms=None, findPid=True ):
         """Monitor and return the output of a command.
            Set self.waiting to False if command has completed.
-           timeoutms: timeout in ms or None to wait indefinitely."""
+           timeoutms: timeout in ms or None to wait indefinitely
+           findPid: look for PID from mnexec -p"""
         self.waitReadable( timeoutms )
         data = self.read( 1024 )
         # Look for PID
         marker = chr( 1 ) + r'\d+\n'
-        if chr( 1 ) in data:
+        if findPid and chr( 1 ) in data:
             markers = re.findall( marker, data )
             if markers:
                 self.lastPid = int( markers[ 0 ][ 1: ] )
@@ -272,7 +275,7 @@ class Node( object ):
             data = data.replace( chr( 127 ), '' )
         return data
 
-    def waitOutput( self, verbose=False ):
+    def waitOutput( self, verbose=False, findPid=True ):
         """Wait for a command to complete.
            Completion is signaled by a sentinel character, ASCII(127)
            appearing in the output stream.  Wait for the sentinel and return
@@ -327,7 +330,10 @@ class Node( object ):
         # Shell requires a string, not a list!
         if defaults.get( 'shell', False ):
             cmd = ' '.join( cmd )
-        return Popen( cmd, **defaults )
+        old = signal.signal( signal.SIGINT, signal.SIG_IGN )
+        popen = self._popen( cmd, **defaults )
+        signal.signal( signal.SIGINT, old )
+        return popen
 
     def pexec( self, *args, **kwargs ):
         """Execute a command using popen
