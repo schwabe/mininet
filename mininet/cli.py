@@ -75,9 +75,9 @@ class CLI( Cmd ):
                 for node in self.mn.values():
                     while node.waiting:
                         node.sendInt()
-                        node.monitor()
+                        node.waitOutput()
                 if self.isatty():
-                    quietRun( 'stty sane' )
+                    quietRun( 'stty echo sane' )
                 self.cmdloop()
                 break
             except KeyboardInterrupt:
@@ -331,6 +331,11 @@ class CLI( Cmd ):
         elapsed = time.time() - start
         self.stdout.write("*** Elapsed time: %0.6f secs\n" % elapsed)
 
+    def do_links( self, line ):
+        "Report on links"
+        for link in self.mn.links:
+            print link, link.status()
+
     def default( self, line ):
         """Called on an input line when the command prefix is not recognized.
         Overridden to run shell commands when a node is the first CLI argument.
@@ -352,8 +357,7 @@ class CLI( Cmd ):
                      for arg in rest ]
             rest = ' '.join( rest )
             # Run cmd on node:
-            builtin = isShellBuiltin( first )
-            node.sendCmd( rest, printPid=( not builtin ) )
+            node.sendCmd( rest )
             self.waitForNode( node )
         else:
             error( '*** Unknown command: %s\n' % line )
@@ -370,18 +374,17 @@ class CLI( Cmd ):
         bothPoller.register( node.stdout, POLLIN )
         if self.isatty():
             # Buffer by character, so that interactive
-            # commands sort of work
+            # commands sort of work, and disable interrupts
             quietRun( 'stty -icanon min 1' )
+        # For local nodes, we need the pty to forward the
+        # interrupt to the shell, but for remote nodes we
+        # DON'T want to send an interrupt to ssh, because
+        # that will cause the connection to die.
+        if hasattr( node, 'server' ):
+            quietRun( [ 'stty', 'intr', ''] )
         while True:
             try:
                 bothPoller.poll()
-                # XXX BL: this doesn't quite do what we want.
-                if False and self.inputFile:
-                    key = self.inputFile.read( 1 )
-                    if key is not '':
-                        node.write(key)
-                    else:
-                        self.inputFile = None
                 if isReadable( self.inPoller ):
                     key = self.stdin.read( 1 )
                     node.write( key )
@@ -391,7 +394,13 @@ class CLI( Cmd ):
                 if not node.waiting:
                     break
             except KeyboardInterrupt:
+                # There is an at least one race condition here, since
+                # it's possible to interrupt ourselves after we've
+                # read data but before it has been printed.
                 node.sendInt()
+        if self.isatty():
+            quietRun( 'stty intr "^C"')
+
 
 # Helper functions
 
