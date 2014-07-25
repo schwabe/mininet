@@ -1040,7 +1040,7 @@ class OVSSwitch( Switch ):
 
     def dpctl( self, *args ):
         "Run ovs-ofctl command"
-        return self.cmd( 'ovs-ofctl', args[ 0 ], self, *args[ 1: ] )
+        return self.cmd( 'ovs-ofctl', '-O', 'OpenFlow13', args[ 0 ], self, *args[ 1: ] )
 
     @staticmethod
     def TCReapply( intf ):
@@ -1104,7 +1104,10 @@ class OVSSwitch( Switch ):
                     'other_config:datapath-id=%s ' % self.dpid +
                     '-- set-fail-mode %s %s ' % ( self, self.failMode ) +
                     intfs +
-                    '-- set-controller %s %s ' % ( self, clist ) )
+                    '-- set-controller %s %s ' % ( self, clist )
+                    +
+                    '-- set Bridge  %s protocols=OpenFlow10,OpenFlow12,OpenFlow13 ' % (self)
+                )
         # Construct ovs-vsctl commands for old versions of OVS
         else:
             self.cmd( 'ovs-vsctl add-br', self )
